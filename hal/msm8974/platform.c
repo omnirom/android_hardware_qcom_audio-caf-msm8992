@@ -61,10 +61,7 @@
 #define COMPRESS_OFFLOAD_FRAGMENT_SIZE (32 * 1024)
 
 /* Used in calculating fragment size for pcm offload */
-#define PCM_OFFLOAD_BUFFER_DURATION_FOR_AV 1000 /* 1 sec */
-#define PCM_OFFLOAD_BUFFER_DURATION_FOR_AV_STREAMING 80 /* 80 millisecs */
-#define PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS 20 /* 20 millisecs */
-#define PCM_OFFLOAD_BUFFER_DURATION_MAX 1200  /* 1200 millisecs */
+#define PCM_OFFLOAD_BUFFER_DURATION 40 /* 40 millisecs */
 
 /* MAX PCM fragment size cannot be increased  further due
  * to flinger's cblk size of 1mb,and it has to be a multiple of
@@ -206,8 +203,10 @@ static int pcm_device_table[AUDIO_USECASE_MAX][2] = {
                                             DEEP_BUFFER_PCM_DEVICE},
     [USECASE_AUDIO_PLAYBACK_LOW_LATENCY] = {LOWLATENCY_PCM_DEVICE,
                                            LOWLATENCY_PCM_DEVICE},
+    [USECASE_AUDIO_PLAYBACK_ULL]         = {MULTIMEDIA3_PCM_DEVICE,
+                                            MULTIMEDIA3_PCM_DEVICE},
     [USECASE_AUDIO_PLAYBACK_MULTI_CH] = {MULTIMEDIA2_PCM_DEVICE,
-                                        MULTIMEDIA2_PCM_DEVICE},
+                                         MULTIMEDIA2_PCM_DEVICE},
     [USECASE_AUDIO_PLAYBACK_OFFLOAD] =
                      {PLAYBACK_OFFLOAD_DEVICE, PLAYBACK_OFFLOAD_DEVICE},
 #ifdef MULTIPLE_OFFLOAD_ENABLED
@@ -228,6 +227,10 @@ static int pcm_device_table[AUDIO_USECASE_MAX][2] = {
     [USECASE_AUDIO_PLAYBACK_OFFLOAD9] =
                      {PLAYBACK_OFFLOAD_DEVICE9, PLAYBACK_OFFLOAD_DEVICE9},
 #endif
+
+    [USECASE_AUDIO_DIRECT_PCM_OFFLOAD] =
+                     {PLAYBACK_OFFLOAD_DEVICE2, PLAYBACK_OFFLOAD_DEVICE2},
+
     [USECASE_AUDIO_RECORD] = {AUDIO_RECORD_PCM_DEVICE, AUDIO_RECORD_PCM_DEVICE},
     [USECASE_AUDIO_RECORD_COMPRESS] = {COMPRESS_CAPTURE_DEVICE, COMPRESS_CAPTURE_DEVICE},
     [USECASE_AUDIO_RECORD_LOW_LATENCY] = {LOWLATENCY_PCM_DEVICE,
@@ -564,6 +567,7 @@ static char * backend_table[SND_DEVICE_MAX] = {0};
 static struct name_to_index usecase_name_index[AUDIO_USECASE_MAX] = {
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_DEEP_BUFFER)},
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_LOW_LATENCY)},
+    {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_ULL)},
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_MULTI_CH)},
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_OFFLOAD)},
 #ifdef MULTIPLE_OFFLOAD_ENABLED
@@ -576,6 +580,7 @@ static struct name_to_index usecase_name_index[AUDIO_USECASE_MAX] = {
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_OFFLOAD8)},
     {TO_NAME_INDEX(USECASE_AUDIO_PLAYBACK_OFFLOAD9)},
 #endif
+    {TO_NAME_INDEX(USECASE_AUDIO_DIRECT_PCM_OFFLOAD)},
     {TO_NAME_INDEX(USECASE_AUDIO_RECORD)},
     {TO_NAME_INDEX(USECASE_AUDIO_RECORD_LOW_LATENCY)},
     {TO_NAME_INDEX(USECASE_VOICE_CALL)},
@@ -2123,12 +2128,20 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
             }
         }
     } else if (source == AUDIO_SOURCE_FM_RX ||
-               source == AUDIO_SOURCE_FM_RX_A2DP) {
+               source == AUDIO_SOURCE_FM_RX_A2DP||
+               source == AUDIO_SOURCE_FM_TUNER) {
         snd_device = SND_DEVICE_IN_CAPTURE_FM;
     } else if (source == AUDIO_SOURCE_DEFAULT) {
         goto exit;
     }
 
+
+    if((audio_extn_ssr_get_enabled()) && (channel_count == 2) &&
+             ((AUDIO_SOURCE_MIC == source) || (AUDIO_SOURCE_CAMCORDER == source))) {
+        //TODO:: check whether SSR mode is on or not
+        //Force input from 3 mic
+        snd_device = SND_DEVICE_IN_SSR_3MIC;
+    }
 
     if((audio_extn_ssr_get_enabled()) && (channel_count == 2) &&
              ((AUDIO_SOURCE_MIC == source) || (AUDIO_SOURCE_CAMCORDER == source))) {
@@ -2173,7 +2186,8 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         } else if (in_device & AUDIO_DEVICE_IN_ANLG_DOCK_HEADSET ||
                    in_device & AUDIO_DEVICE_IN_DGTL_DOCK_HEADSET) {
             snd_device = SND_DEVICE_IN_USB_HEADSET_MIC;
-        } else if (in_device & AUDIO_DEVICE_IN_FM_RX) {
+        } else if (in_device & AUDIO_DEVICE_IN_FM_RX ||
+                   in_device & AUDIO_DEVICE_IN_FM_TUNER) {
             snd_device = SND_DEVICE_IN_CAPTURE_FM;
         } else {
             ALOGE("%s: Unknown input device(s) %#x", __func__, in_device);
@@ -2842,7 +2856,8 @@ int64_t platform_render_latency(audio_usecase_t usecase)
 int platform_update_usecase_from_source(int source, int usecase)
 {
     ALOGV("%s: input source :%d", __func__, source);
-    if(source == AUDIO_SOURCE_FM_RX_A2DP)
+    if (source == AUDIO_SOURCE_FM_RX_A2DP ||
+        source == AUDIO_SOURCE_FM_TUNER)
         usecase = USECASE_AUDIO_RECORD_FM_VIRTUAL;
     return usecase;
 }
@@ -2924,25 +2939,13 @@ uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info)
 {
     uint32_t fragment_size = 0;
     uint32_t bits_per_sample = 16;
-    uint32_t pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS;
+    uint32_t pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION;
 
     if (info->format == AUDIO_FORMAT_PCM_24_BIT_OFFLOAD) {
         bits_per_sample = 32;
     }
 
-    if (info->use_small_bufs) {
-        pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_SMALL_BUFFERS;
-    } else {
-        if (!info->has_video) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_MAX;
-        } else if (info->has_video && info->is_streaming) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_AV_STREAMING;
-        } else if (info->has_video) {
-            pcm_offload_time = PCM_OFFLOAD_BUFFER_DURATION_FOR_AV;
-        }
-    }
-
-    //duration is set to 20 ms worth of stereo data at 48Khz
+    //duration is set to 40 ms worth of stereo data at 48Khz
     //with 16 bit per sample, modify this when the channel
     //configuration is different
     fragment_size = (pcm_offload_time
@@ -2961,6 +2964,11 @@ uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info)
 
     ALOGI("PCM offload Fragment size to %d bytes", fragment_size);
     return fragment_size;
+}
+
+bool platform_use_small_buffer(audio_offload_info_t* info)
+{
+    return OFFLOAD_USE_SMALL_BUFFER;
 }
 
 int platform_set_codec_backend_cfg(struct audio_device* adev,

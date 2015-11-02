@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2014 The Android Open Source Project
@@ -59,6 +59,7 @@ struct string_to_enum {
 
 const struct string_to_enum s_flag_name_to_enum_table[] = {
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_DIRECT),
+    STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_DIRECT_PCM),
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_PRIMARY),
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_FAST),
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_DEEP_BUFFER),
@@ -68,10 +69,9 @@ const struct string_to_enum s_flag_name_to_enum_table[] = {
 #ifdef INCALL_MUSIC_ENABLED
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_INCALL_MUSIC),
 #endif
-#ifdef COMPRESS_VOIP_ENABLED
-    STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_VOIP_RX),
-#endif
+#ifdef HDMI_PASSTHROUGH_ENABLED
     STRING_TO_ENUM(AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH),
+#endif
 };
 
 const struct string_to_enum s_format_name_to_enum_table[] = {
@@ -84,7 +84,7 @@ const struct string_to_enum s_format_name_to_enum_table[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_AMR_WB),
     STRING_TO_ENUM(AUDIO_FORMAT_AC3),
     STRING_TO_ENUM(AUDIO_FORMAT_E_AC3),
-#ifdef FORMATS_ENABLED
+#ifdef AUDIO_EXTN_FORMATS_ENABLED
     STRING_TO_ENUM(AUDIO_FORMAT_DTS),
     STRING_TO_ENUM(AUDIO_FORMAT_DTS_LBR),
     STRING_TO_ENUM(AUDIO_FORMAT_WMA),
@@ -100,6 +100,8 @@ const struct string_to_enum s_format_name_to_enum_table[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_16_BIT_OFFLOAD),
     STRING_TO_ENUM(AUDIO_FORMAT_PCM_24_BIT_OFFLOAD),
     STRING_TO_ENUM(AUDIO_FORMAT_FLAC),
+    STRING_TO_ENUM(AUDIO_FORMAT_ALAC),
+    STRING_TO_ENUM(AUDIO_FORMAT_APE),
     STRING_TO_ENUM(AUDIO_FORMAT_E_AC3_JOC),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_LC),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_HE_V1),
@@ -565,8 +567,11 @@ int audio_extn_utils_send_app_type_cfg(struct audio_usecase *usecase)
     app_type_cfg[len++] = out->app_type_cfg.app_type;
     app_type_cfg[len++] = acdb_dev_id;
     if (((out->format == AUDIO_FORMAT_E_AC3) ||
-        (out->format == AUDIO_FORMAT_E_AC3_JOC)) &&
-        (out->flags  & AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH))
+        (out->format == AUDIO_FORMAT_E_AC3_JOC))
+#ifdef HDMI_PASSTHROUGH_ENABLED
+        &&(out->flags  & AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH)
+#endif
+        )
         app_type_cfg[len++] = sample_rate * 4;
     else
         app_type_cfg[len++] = sample_rate;

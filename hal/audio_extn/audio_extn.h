@@ -41,19 +41,18 @@
 #include <cutils/str_parms.h>
 
 #ifndef PCM_OFFLOAD_ENABLED
-#define AUDIO_FORMAT_PCM_OFFLOAD 0x17000000UL
+#define AUDIO_FORMAT_PCM_OFFLOAD 0x1A000000UL
 #define AUDIO_FORMAT_PCM_16_BIT_OFFLOAD (AUDIO_FORMAT_PCM_OFFLOAD | AUDIO_FORMAT_PCM_SUB_16_BIT)
 #define AUDIO_FORMAT_PCM_24_BIT_OFFLOAD (AUDIO_FORMAT_PCM_OFFLOAD | AUDIO_FORMAT_PCM_SUB_8_24_BIT)
 #define AUDIO_OFFLOAD_CODEC_FORMAT  "music_offload_codec_format"
 #define audio_is_offload_pcm(format) (0)
+#define OFFLOAD_USE_SMALL_BUFFER false
+#else
+#define OFFLOAD_USE_SMALL_BUFFER ((info->format & AUDIO_FORMAT_PCM_OFFLOAD) == AUDIO_FORMAT_PCM_OFFLOAD)
 #endif
 
 #ifndef AFE_PROXY_ENABLED
 #define AUDIO_DEVICE_OUT_PROXY 0x40000
-#endif
-
-#ifndef COMPRESS_VOIP_ENABLED
-#define AUDIO_OUTPUT_FLAG_VOIP_RX 0x4000
 #endif
 
 #ifndef INCALL_MUSIC_ENABLED
@@ -69,18 +68,37 @@
 #define AUDIO_DEVICE_IN_FM_RX_A2DP (AUDIO_DEVICE_BIT_IN | 0x10000)
 #endif
 
-#ifndef QTI_FLAC_DECODER
-#define AUDIO_FORMAT_FLAC 0x19000000UL
-#define AUDIO_OFFLOAD_CODEC_FLAC_MIN_BLK_SIZE "music_offload_flac_min_blk_size"
-#define AUDIO_OFFLOAD_CODEC_FLAC_MAX_BLK_SIZE "music_offload_flac_max_blk_size"
-#define AUDIO_OFFLOAD_CODEC_FLAC_MIN_FRAME_SIZE "music_offload_flac_min_frame_size"
-#define AUDIO_OFFLOAD_CODEC_FLAC_MAX_FRAME_SIZE "music_offload_flac_max_frame_size"
+#ifndef FLAC_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_FLAC 0x1B000000UL
 #endif
 
-#ifdef PCM_OFFLOAD_ENABLED_24
-#define PCM_OUTPUT_BIT_WIDTH (config->offload_info.bit_width)
+#ifndef WMA_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_WMA 0x12000000UL
+#define AUDIO_FORMAT_WMA_PRO 0x13000000UL
+#endif
+
+#ifndef ALAC_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_ALAC 0x1C000000UL
+#define SND_AUDIOCODEC_ALAC 0x00000019
+#endif
+
+#ifndef APE_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_APE 0x1D000000UL
+#define SND_AUDIOCODEC_APE 0x00000020
+#endif
+
+#ifndef COMPRESS_METADATA_NEEDED
+#define audio_extn_parse_compress_metadata(out, parms) (0)
 #else
-#define PCM_OUTPUT_BIT_WIDTH (CODEC_BACKEND_DEFAULT_BIT_WIDTH)
+int audio_extn_parse_compress_metadata(struct stream_out *out,
+                                       struct str_parms *parms);
+#endif
+
+#ifdef AUDIO_EXTN_FORMATS_ENABLED
+#define AUDIO_OUTPUT_BIT_WIDTH ((config->offload_info.bit_width == 32) ? 24\
+                                   :config->offload_info.bit_width)
+#else
+#define AUDIO_OUTPUT_BIT_WIDTH (CODEC_BACKEND_DEFAULT_BIT_WIDTH)
 #endif
 
 #define MAX_LENGTH_MIXER_CONTROL_IN_INT                  (128)
@@ -308,6 +326,9 @@ void audio_extn_check_and_set_dts_hpx_state(const struct audio_device *adev);
 void audio_extn_dolby_set_dmid(struct audio_device *adev);
 #else
 #define audio_extn_dolby_set_dmid(adev)                 (0)
+#define AUDIO_CHANNEL_OUT_PENTA (AUDIO_CHANNEL_OUT_QUAD | AUDIO_CHANNEL_OUT_FRONT_CENTER)
+#define AUDIO_CHANNEL_OUT_SURROUND (AUDIO_CHANNEL_OUT_FRONT_LEFT | AUDIO_CHANNEL_OUT_FRONT_RIGHT | \
+                                    AUDIO_CHANNEL_OUT_FRONT_CENTER | AUDIO_CHANNEL_OUT_BACK_CENTER)
 #endif
 
 
@@ -446,6 +467,9 @@ typedef enum {
 } dap_state;
 #ifndef AUDIO_FORMAT_E_AC3_JOC
 #define AUDIO_FORMAT_E_AC3_JOC  0x19000000UL
+#endif
+#ifndef AUDIO_FORMAT_DTS_LBR
+#define AUDIO_FORMAT_DTS_LBR 0x1E000000UL
 #endif
 
 int b64decode(char *inp, int ilen, uint8_t* outp);
