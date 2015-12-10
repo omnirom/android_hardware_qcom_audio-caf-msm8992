@@ -1946,9 +1946,6 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
         if (val != 0) {
             out->devices = val;
 
-            if (!out->standby)
-                select_devices(adev, out->usecase);
-
             if (output_drives_call(adev, out)) {
                 if(!voice_is_in_call(adev)) {
                     if (adev->mode == AUDIO_MODE_IN_CALL) {
@@ -1960,6 +1957,9 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
                     voice_update_devices_for_all_voice_usecases(adev);
                 }
             }
+
+            if (!out->standby)
+                select_devices(adev, out->usecase);
         }
 
         pthread_mutex_unlock(&adev->lock);
@@ -2032,6 +2032,21 @@ static char* out_get_parameters(const struct audio_stream *stream, const char *k
             free(str);
             str = strdup(keys);
         }
+    }
+
+
+    ret = str_parms_get_str(query, "is_direct_pcm_track", value, sizeof(value));
+    if (ret >= 0) {
+        value[0] = '\0';
+        if (out->flags & AUDIO_OUTPUT_FLAG_DIRECT_PCM) {
+            ALOGV("in direct_pcm");
+            strlcat(value, "true", strlen("true"));
+        } else {
+            ALOGV("not in direct_pcm");
+            strlcat(value, "false", strlen("false"));
+        }
+        str_parms_add_str(reply, "is_direct_pcm_track", value);
+        str = str_parms_to_str(reply);
     }
 
     ret = str_parms_get_str(query, AUDIO_PARAMETER_STREAM_SUP_FORMATS, value, sizeof(value));
