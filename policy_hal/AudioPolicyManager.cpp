@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  * Not a contribution.
  *
  * Copyright (C) 2009 The Android Open Source Project
@@ -9,6 +9,24 @@
  * You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * This file was modified by Dolby Laboratories, Inc. The portions of the
+ * code that are surrounded by "DOLBY..." are copyrighted and
+ * licensed separately, as follows:
+ *
+ *  (C) 2015 Dolby Laboratories, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,6 +64,9 @@
 #include <soundtrigger/SoundTrigger.h>
 #include "AudioPolicyManager.h"
 #include <policy.h>
+#ifdef DOLBY_ENABLE
+#include "DolbyAudioPolicy_impl.h"
+#endif // DOLBY_END
 
 namespace android {
 #ifdef VOICE_CONCURRENCY
@@ -246,6 +267,11 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
         }
 
         updateDevicesAndOutputs();
+#ifdef DOLBY_ENABLE
+        // Before closing the opened outputs, update endpoint property with device capabilities
+        audio_devices_t audioOutputDevice = getDeviceForStrategy(getStrategy(AUDIO_STREAM_MUSIC), true);
+        mDolbyAudioPolicy.setEndpointSystemProperty(audioOutputDevice, mHwModules);
+#endif // DOLBY_END
         if (mEngine->getPhoneState() == AUDIO_MODE_IN_CALL && hasPrimaryOutput()) {
             audio_devices_t newDevice = getNewOutputDevice(mPrimaryOutput, false /*fromCache*/);
             updateCallRouting(newDevice);
@@ -253,15 +279,21 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
 
 #ifdef FM_POWER_OPT
         // handle FM device connection state to trigger FM AFE loopback
-        if(device == AUDIO_DEVICE_OUT_FM && hasPrimaryOutput()) {
-           audio_devices_t newDevice = getNewOutputDevice(mPrimaryOutput, false /*fromCache*/);
+        if (device == AUDIO_DEVICE_OUT_FM && hasPrimaryOutput()) {
+           audio_devices_t newDevice = AUDIO_DEVICE_NONE;
            if (state == AUDIO_POLICY_DEVICE_STATE_AVAILABLE) {
                mPrimaryOutput->changeRefCount(AUDIO_STREAM_MUSIC, 1);
-               newDevice = newDevice | AUDIO_DEVICE_OUT_FM;
+               newDevice = (audio_devices_t)(getNewOutputDevice(mPrimaryOutput, false)|AUDIO_DEVICE_OUT_FM);
+               mFMIsActive = true;
            } else {
+               newDevice = (audio_devices_t)(getNewOutputDevice(mPrimaryOutput, false));
+               mFMIsActive = false;
                mPrimaryOutput->changeRefCount(AUDIO_STREAM_MUSIC, -1);
            }
            AudioParameter param = AudioParameter();
+           float volumeDb = mPrimaryOutput->mCurVolume[AUDIO_STREAM_MUSIC];
+           mPrevFMVolumeDb = volumeDb;
+           param.addFloat(String8("fm_volume"), Volume::DbToAmpl(volumeDb));
            param.addInt(String8("handle_fm"), (int)newDevice);
            mpClientInterface->setParameters(mPrimaryOutput->mIoHandle, param.toString());
         }
@@ -365,6 +397,7 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
     ALOGW("setDeviceConnectionState() invalid device: %x", device);
     return BAD_VALUE;
 }
+
 // This function checks for the parameters which can be offloaded.
 // This can be enhanced depending on the capability of the DSP and policy
 // of the system.
@@ -536,6 +569,7 @@ bool AudioPolicyManagerCustom::isOffloadSupported(const audio_offload_info_t& of
     ALOGV("isOffloadSupported() profile %sfound", profile != 0 ? "" : "NOT ");
     return (profile != 0);
 }
+
 audio_devices_t AudioPolicyManagerCustom::getNewOutputDevice(const sp<AudioOutputDescriptor>& outputDesc,
                                                        bool fromCache)
 {
@@ -601,6 +635,7 @@ audio_devices_t AudioPolicyManagerCustom::getNewOutputDevice(const sp<AudioOutpu
     ALOGV("getNewOutputDevice() selected device %x", device);
     return device;
 }
+
 void AudioPolicyManagerCustom::setPhoneState(audio_mode_t state)
 {
     ALOGV("setPhoneState() state %d", state);
@@ -615,7 +650,7 @@ void AudioPolicyManagerCustom::setPhoneState(audio_mode_t state)
     /// Opens: can these line be executed after the switch of volume curves???
     // if leaving call state, handle special case of active streams
     // pertaining to sonification strategy see handleIncallSonification()
-    if (isInCall()) {
+    if (isStateInCall(oldState)) {
         ALOGV("setPhoneState() in call state management: new state is %d", state);
         for (size_t j = 0; j < mOutputs.size(); j++) {
             audio_io_handle_t curOutput = mOutputs.keyAt(j);
@@ -936,7 +971,7 @@ status_t AudioPolicyManagerCustom::stopSource(sp<AudioOutputDescriptor> outputDe
     handleEventForBeacon(stream == AUDIO_STREAM_TTS ? STOPPING_BEACON : STOPPING_OUTPUT);
 
     // handle special case for sonification while in call
-    if (isInCall() && (outputDesc->mRefCount[stream] == 1)) {
+    if (isInCall()) {
         if (outputDesc->isDuplicated()) {
             handleIncallSonification(stream, false, false, outputDesc->subOutput1()->mIoHandle);
             handleIncallSonification(stream, false, false, outputDesc->subOutput2()->mIoHandle);
@@ -991,6 +1026,7 @@ status_t AudioPolicyManagerCustom::stopSource(sp<AudioOutputDescriptor> outputDe
         return INVALID_OPERATION;
     }
 }
+
 status_t AudioPolicyManagerCustom::startSource(sp<AudioOutputDescriptor> outputDesc,
                                              audio_stream_type_t stream,
                                              audio_devices_t device,
@@ -1076,13 +1112,14 @@ status_t AudioPolicyManagerCustom::startSource(sp<AudioOutputDescriptor> outputD
         }
     }
     else {
-            // handle special case for sonification while in call
-            if (isInCall()) {
-                handleIncallSonification(stream, true, false, outputDesc->mIoHandle);
-              }
+        // handle special case for sonification while in call
+        if (isInCall()) {
+            handleIncallSonification(stream, true, false, outputDesc->mIoHandle);
         }
+    }
     return NO_ERROR;
 }
+
 void AudioPolicyManagerCustom::handleIncallSonification(audio_stream_type_t stream,
                                                       bool starting, bool stateChange,
                                                       audio_io_handle_t output)
@@ -1135,6 +1172,7 @@ void AudioPolicyManagerCustom::handleIncallSonification(audio_stream_type_t stre
         }
     }
 }
+
 void AudioPolicyManagerCustom::handleNotificationRoutingForStream(audio_stream_type_t stream) {
     switch(stream) {
     case AUDIO_STREAM_MUSIC:
@@ -1145,6 +1183,7 @@ void AudioPolicyManagerCustom::handleNotificationRoutingForStream(audio_stream_t
         break;
     }
 }
+
 status_t AudioPolicyManagerCustom::checkAndSetVolume(audio_stream_type_t stream,
                                                    int index,
                                                    const sp<AudioOutputDescriptor>& outputDesc,
@@ -1199,15 +1238,22 @@ status_t AudioPolicyManagerCustom::checkAndSetVolume(audio_stream_type_t stream,
         }
 #ifdef FM_POWER_OPT
     } else if (stream == AUDIO_STREAM_MUSIC && hasPrimaryOutput() &&
-               outputDesc == mPrimaryOutput) {
-        AudioParameter param = AudioParameter();
-        param.addFloat(String8("fm_volume"), Volume::DbToAmpl(volumeDb));
-        mpClientInterface->setParameters(mPrimaryOutput->mIoHandle, param.toString(), delayMs);
+               outputDesc == mPrimaryOutput && mFMIsActive) {
+        /* Avoid unnecessary set_parameter calls as it puts the primary
+           outputs FastMixer in HOT_IDLE leading to breaks in audio */
+        if (volumeDb != mPrevFMVolumeDb) {
+            mPrevFMVolumeDb = volumeDb;
+            AudioParameter param = AudioParameter();
+            param.addFloat(String8("fm_volume"), Volume::DbToAmpl(volumeDb));
+            //Double delayMs to avoid sound burst while device switch.
+            mpClientInterface->setParameters(mPrimaryOutput->mIoHandle, param.toString(), delayMs*2);
+        }
 #endif /* FM_POWER_OPT end */
     }
 
     return NO_ERROR;
 }
+
 bool AudioPolicyManagerCustom::isDirectOutput(audio_io_handle_t output) {
     for (size_t i = 0; i < mOutputs.size(); i++) {
         audio_io_handle_t curOutput = mOutputs.keyAt(i);
@@ -1356,8 +1402,8 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
                 property_get("use.voice.path.for.pcm.voip", propValue, "0");
                 bool voipPcmSysPropEnabled = !strncmp("true", propValue, sizeof("true"));
                 if (voipPcmSysPropEnabled && (format == AUDIO_FORMAT_PCM_16_BIT)) {
-                    flags = (audio_output_flags_t)((flags &~AUDIO_OUTPUT_FLAG_FAST) |
-                                AUDIO_OUTPUT_FLAG_VOIP_RX | AUDIO_OUTPUT_FLAG_DIRECT);
+                    flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_VOIP_RX |
+                                                 AUDIO_OUTPUT_FLAG_DIRECT);
                     ALOGD("Set VoIP and Direct output flags for PCM format");
                 }
             }
@@ -1492,18 +1538,18 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
     } else if (/* stream == AUDIO_STREAM_MUSIC && */
             flags == AUDIO_OUTPUT_FLAG_NONE &&
             property_get_bool("audio.deep_buffer.media", false /* default_value */)) {
-        flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_DEEP_BUFFER);
-        forced_deep = true;
+            forced_deep = true;
     }
     if (stream == AUDIO_STREAM_TTS) {
         flags = AUDIO_OUTPUT_FLAG_TTS;
     }
 
     // Do offload magic here
-    if (((flags == AUDIO_OUTPUT_FLAG_NONE) || forced_deep) &&
-        (stream == AUDIO_STREAM_MUSIC) && (offloadInfo != NULL) &&
+    if ((flags == AUDIO_OUTPUT_FLAG_NONE) &&
+        (stream == AUDIO_STREAM_MUSIC) &&
+        (offloadInfo != NULL) &&
         ((offloadInfo->usage == AUDIO_USAGE_MEDIA) || (offloadInfo->usage == AUDIO_USAGE_GAME))) {
-        flags = (audio_output_flags_t)(flags | AUDIO_OUTPUT_FLAG_DIRECT);
+        flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_DIRECT_PCM);
         ALOGD("AudioCustomHAL --> Force Direct Flag .. flag (0x%x)", flags);
     }
 
@@ -1511,7 +1557,7 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
 
     // skip direct output selection if the request can obviously be attached to a mixed output
     // and not explicitly requested
-    if (((flags & AUDIO_OUTPUT_FLAG_DIRECT) == 0) &&
+    if (((flags & (AUDIO_OUTPUT_FLAG_DIRECT|AUDIO_OUTPUT_FLAG_DIRECT_PCM)) == 0) &&
             audio_is_linear_pcm(format) && samplingRate <= MAX_MIXER_SAMPLING_RATE &&
             audio_channel_count_from_out_mask(channelMask) <= 2) {
         goto non_direct_output;
@@ -1534,6 +1580,14 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
     }
 
     if (profile != 0) {
+
+        if (!(flags & AUDIO_OUTPUT_FLAG_DIRECT_PCM) &&
+             (profile->mFlags & AUDIO_OUTPUT_FLAG_DIRECT_PCM)) {
+            ALOGI("got Direct_PCM without requesting ... reject ");
+            profile = NULL;
+            goto non_direct_output;
+        }
+
         sp<SwAudioOutputDescriptor> outputDesc = NULL;
 
         for (size_t i = 0; i < mOutputs.size(); i++) {
@@ -1619,7 +1673,23 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
         addOutput(output, outputDesc);
         audio_io_handle_t dstOutput = getOutputForEffect();
         if (dstOutput == output) {
+#ifdef DOLBY_ENABLE
+            status_t status = mpClientInterface->moveEffects(AUDIO_SESSION_OUTPUT_MIX, srcOutput, dstOutput);
+            if (status == NO_ERROR) {
+                for (size_t i = 0; i < mEffects.size(); i++) {
+                    sp<EffectDescriptor> desc = mEffects.valueAt(i);
+                    if (desc->mSession == AUDIO_SESSION_OUTPUT_MIX) {
+                        // update the mIo member of EffectDescriptor for the global effect
+                        ALOGV("%s updating mIo", __FUNCTION__);
+                        desc->mIo = dstOutput;
+                    }
+                }
+            } else {
+                ALOGW("%s moveEffects from %d to %d failed", __FUNCTION__, srcOutput, dstOutput);
+            }
+#else // DOLBY_END
             mpClientInterface->moveEffects(AUDIO_SESSION_OUTPUT_MIX, srcOutput, dstOutput);
+#endif // LINE_ADDED_BY_DOLBY
         }
         mPreviousOutputs = mOutputs;
         ALOGV("getOutput() returns new direct output %d", output);
@@ -1634,6 +1704,10 @@ non_direct_output:
 
     // for non direct outputs, only PCM is supported
     if (audio_is_linear_pcm(format)) {
+        if (forced_deep) {
+            flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_DEEP_BUFFER);
+            ALOGI("setting force DEEP buffer now ");
+        }
         // get which output is suitable for the specified stream. The actual
         // routing change will happen when startOutput() will be called
         SortedVector<audio_io_handle_t> outputs = getOutputsForDevice(device, mOutputs);
@@ -1733,6 +1807,7 @@ status_t AudioPolicyManagerCustom::getInputForAttr(const audio_attributes_t *att
                                                selectedDeviceId,
                                                inputType);
 }
+
 status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
                                         audio_session_t session)
 {
@@ -1856,6 +1931,7 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
 #endif
     return NO_ERROR;
 }
+
 status_t AudioPolicyManagerCustom::stopInput(audio_io_handle_t input,
                                        audio_session_t session)
 {
@@ -1895,7 +1971,9 @@ AudioPolicyManagerCustom::AudioPolicyManagerCustom(AudioPolicyClientInterface *c
     : AudioPolicyManager(clientInterface),
       mHdmiAudioDisabled(false),
       mHdmiAudioEvent(false),
-      mPrevPhoneState(0)
+      mPrevPhoneState(0),
+      mPrevFMVolumeDb(0.0f),
+      mFMIsActive(false)
 {
     char ssr_enabled[PROPERTY_VALUE_MAX] = {0};
     bool prop_ssr_enabled = false;
